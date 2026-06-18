@@ -258,6 +258,16 @@ def agent(obs_dict: dict) -> list[int]:
         elif o.type == OptionType.EVOLVE:
             pokemon = get_card(obs, o.inPlayArea, o.inPlayIndex, my_index)
             score = 90000 + len(pokemon.energies) * 10
+            if pokemon.id in (Applin_TWM, Applin_SCR):
+                if field_counts[Dipplin] > 0:
+                    score -= 2000
+                if not active_has_festival_lead:
+                    score += 1000
+            elif pokemon.id == Grookey:
+                if field_counts[Thwackey] > 0:
+                    score -= 2000
+                if active_has_festival_lead:
+                    score += 1000
 
         elif o.type == OptionType.PLAY:
             card = get_card(obs, AreaType.HAND, o.index, my_index)
@@ -288,21 +298,27 @@ def agent(obs_dict: dict) -> list[int]:
                 elif card.id == Lillie_Det:
                     score = 25000
                 elif card.id == Black_Belt:
-                    score = 26000 if op_active_is_ex else -1
+                    lillie_available = hand_counts.get(Lillie_Det, 0) > 0
+                    use_bb = op_active_is_ex and (bench_full or not lillie_available)
+                    score = 24000 if use_bb else -1
                 elif card.id == Boss_Orders:
-                    use_boss = can_attack_now and cannot_ko_active and len(op_state.bench) >= 1
+                    bench_ko_targets = [c for c in op_state.bench if c is not None and c.hp <= my_damage]
+                    use_boss = can_attack_now and cannot_ko_active and len(bench_ko_targets) >= 1
                     score = 22000 if use_boss else -1
                 elif card.id == Lana_Aid:
-                    recoverable = sum(
-                        v for k, v in discard_counts.items()
-                        if k in (Grookey, Applin_TWM, Applin_SCR, Dipplin,
-                                 Goldeen, Rellor, Rabsca, Shaymin, Grass_Energy)
+                    lana_targets = {Grookey, Applin_TWM, Applin_SCR, Dipplin,
+                                    Goldeen, Rellor, Rabsca, Shaymin, Grass_Energy}
+                    needed_in_discard = sum(
+                        discard_counts.get(cid, 0)
+                        for cid in needs
+                        if cid in lana_targets and needs[cid] >= 5
                     )
-                    score = 20000 if recoverable >= 1 else -1
+                    score = 20000 if needed_in_discard >= 1 else -1
                 elif card.id == Dawn:
-                    score = 21000
+                    score = 21000 if not bench_full and pokemon_need_max >= 4 else -1
                 elif card.id == Kieran:
-                    score = 19000
+                    switch_in_hand = hand_counts.get(Air_Balloon, 0) > 0 or hand_counts.get(Switch_Card, 0) > 0
+                    score = 19000 if not switch_in_hand else -1
 
             else:  # ITEM
                 if card.id == Buddy_Poffin:
@@ -359,12 +375,12 @@ def agent(obs_dict: dict) -> list[int]:
 
         elif o.type == OptionType.ABILITY:
             card = get_card(obs, o.area, o.index, my_index)
-            if no_draw:
-                score = -1
-            elif card.id == Thwackey:
-                score = 55000 if active_has_festival_lead else -1
+            if card.id == Thwackey:
+                score = 55000 if (active_has_festival_lead and not no_draw) else -1
+            elif card.id == Rabsca:
+                score = 35000 if op_active_is_ex else 30000
             else:
-                score = 30000
+                score = 30000 if not no_draw else -1
 
         elif o.type == OptionType.RETREAT:
             score = 8000 if need_retreat else -1
@@ -382,16 +398,20 @@ def agent(obs_dict: dict) -> list[int]:
 
             if context in (SelectContext.SWITCH, SelectContext.TO_ACTIVE,
                            SelectContext.SETUP_ACTIVE_POKEMON):
-                # 優先度: Festival Lead アタッカー > 捨て駒 > ベンチ役（Thwackey/Rabsca）
-                score = energy_count * 200
-                if card.id == Dipplin:                              score += 5000
-                elif card.id == Seaking:                            score += 3000
-                elif card.id == Goldeen:                            score += 2000
-                elif card.id in (Grookey, Applin_TWM, Applin_SCR): score += 500
-                elif card.id == Rellor:                             score += 300
-                elif card.id == Thwackey:                           score += 100
-                elif card.id == Rabsca:                             score += 50
-                elif card.id == Shaymin:                            score += 50
+                if o.playerIndex != my_index:
+                    # Boss Orders: KOできるターゲットを最優先、残HPが低いほど高スコア
+                    score = (10000 - card.hp) if isinstance(card, Pokemon) and card.hp <= my_damage else 0
+                else:
+                    # 優先度: Festival Lead アタッカー > 捨て駒 > ベンチ役（Thwackey/Rabsca）
+                    score = energy_count * 200
+                    if card.id == Dipplin:                              score += 5000
+                    elif card.id == Seaking:                            score += 3000
+                    elif card.id == Goldeen:                            score += 2000
+                    elif card.id in (Grookey, Applin_TWM, Applin_SCR): score += 500
+                    elif card.id == Rellor:                             score += 300
+                    elif card.id == Thwackey:                           score += 100
+                    elif card.id == Rabsca:                             score += 50
+                    elif card.id == Shaymin:                            score += 50
 
             elif context == SelectContext.SETUP_BENCH_POKEMON:
                 if card.id in (Applin_TWM, Applin_SCR): score = 500
@@ -409,10 +429,18 @@ def agent(obs_dict: dict) -> list[int]:
 
             elif context == SelectContext.DISCARD:
                 score = 0
-                if card.id == Grass_Energy:
-                    score = 10
-                elif card.id in (Dipplin, Thwackey, Rabsca, Shaymin, Festival_Grounds):
+                if card.id == Festival_Grounds:
+                    score = 500 if festival_up else -500
+                elif card.id in (Dipplin, Thwackey, Rabsca, Shaymin):
                     score = -500
+                elif card.id == Lillie_Det:
+                    score = -300 if not state.supporterPlayed else 200
+                elif card.id in (Black_Belt, Boss_Orders, Lana_Aid, Dawn, Kieran):
+                    score = 300
+                elif card.id == Buddy_Poffin:
+                    score = 400 if bench_full else 50
+                elif card.id == Grass_Energy:
+                    score = 10
                 elif card.id in (Grookey, Applin_TWM, Applin_SCR):
                     score = 100 if field_counts.get(card.id, 0) >= 2 else 50
                 else:
