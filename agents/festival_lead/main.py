@@ -1,9 +1,11 @@
 import os
+import random
 from collections import defaultdict
 
 from cg.api import (
     AreaType, CardType, Observation, SelectContext, OptionType,
     Card, Pokemon, all_card_data, all_attack, to_observation_class,
+    search_begin, search_end, search_step,
 )
 
 """
@@ -67,6 +69,54 @@ def get_card(obs: Observation, area: AreaType, index: int, player_index: int) ->
         case AreaType.STADIUM: return obs.current.stadium[index]
         case AreaType.LOOKING: return obs.current.looking[index]
         case _:                return None
+
+
+def _simulate_attack(obs: Observation, opt_idx: int) -> tuple[int, bool]:
+    """
+    Search API でアタック opt_idx を1ステップ先読みし (ダメージ, KO判定) を返す。
+    失敗時は (0, False) を返す。
+    """
+    state    = obs.current
+    mi       = state.yourIndex
+    ms       = state.players[mi]
+    ops      = state.players[1 - mi]
+    op_active = ops.active[0] if ops.active and ops.active[0] is not None else None
+    if op_active is None:
+        return (0, False)
+
+    initial_hp     = op_active.hp
+    initial_prizes = len(ms.prize)
+    deck_n  = min(ms.deckCount,  len(my_deck))
+    prize_n = min(len(ms.prize), len(my_deck))
+
+    try:
+        ss = search_begin(
+            obs,
+            your_deck      = random.sample(my_deck, deck_n)  if deck_n  > 0 else [],
+            your_prize     = random.sample(my_deck, prize_n) if prize_n > 0 else [],
+            opponent_deck  = [Grass_Energy] * ops.deckCount,
+            opponent_prize = [Grass_Energy] * len(ops.prize),
+            opponent_hand  = [Grass_Energy] * ops.handCount,
+            opponent_active= [],
+        )
+        r       = search_step(ss.searchId, [opt_idx])
+        new_s   = r.observation.current
+        is_ko   = len(new_s.players[mi].prize) < initial_prizes
+
+        if not is_ko:
+            noa    = new_s.players[1 - mi].active[0]
+            damage = (initial_hp - noa.hp) if (noa is not None and noa.id == op_active.id) else initial_hp
+        else:
+            damage = initial_hp
+
+        search_end()
+        return (damage, is_ko)
+    except Exception:
+        try:
+            search_end()
+        except Exception:
+            pass
+        return (0, False)
 
 
 def agent(obs_dict: dict) -> list[int]:
@@ -153,6 +203,27 @@ def agent(obs_dict: dict) -> list[int]:
             my_damage *= 2
 
     cannot_ko_active = (op_active_poke is None or op_active_poke.hp > my_damage)
+
+    # --- simulation: 実際に攻撃オプションが存在するか + 正確なダメージを取得 ---
+    # can_attack_now（元の推定値）は needs アセスメントで退場判断に使う
+    # will_attack_this_turn は現在の select に ATTACK が含まれる場合のみ True
+    attack_option_indices = [i for i, o in enumerate(select.option) if o.type == OptionType.ATTACK]
+    will_attack_this_turn = bool(attack_option_indices)
+
+    sim_info: dict[int, tuple[int, bool]] = {}  # option_idx → (damage, is_ko)
+    if will_attack_this_turn and op_active_poke is not None:
+        for idx in attack_option_indices:
+            sim_info[idx] = _simulate_attack(obs, idx)
+
+    # シミュレーションが有効なら使用。全て失敗（d=0, ko=False）の場合は推定値にフォールバック
+    valid_sims = {k: v for k, v in sim_info.items() if v[0] > 0 or v[1]}
+    if valid_sims:
+        sim_best_damage  = max(d for d, _ in valid_sims.values())
+        sim_ko_active    = any(k for _, k in valid_sims.values())
+        cannot_ko_active = not sim_ko_active
+    else:
+        sim_best_damage  = my_damage
+        # cannot_ko_active は上の推定値を維持
 
     # ================================================================
     # ニーズアセスメント
@@ -246,7 +317,7 @@ def agent(obs_dict: dict) -> list[int]:
     # スコアリング
     # ================================================================
     scores = []
-    for o in select.option:
+    for idx, o in enumerate(select.option):
         score = 0
 
         if o.type == OptionType.NUMBER:
@@ -302,8 +373,10 @@ def agent(obs_dict: dict) -> list[int]:
                     use_bb = op_active_is_ex and (bench_full or not lillie_available)
                     score = 24000 if use_bb else -1
                 elif card.id == Boss_Orders:
-                    bench_ko_targets = [c for c in op_state.bench if c is not None and c.hp <= my_damage]
-                    use_boss = can_attack_now and cannot_ko_active and len(bench_ko_targets) >= 1
+                    # will_attack_this_turn: 今のターンに実際に ATTACK オプションがある場合のみ True
+                    # sim_best_damage: シミュレーション済み実ダメージ（ツール・弱点込み）
+                    bench_ko_targets = [c for c in op_state.bench if c is not None and c.hp <= sim_best_damage]
+                    use_boss = will_attack_this_turn and cannot_ko_active and len(bench_ko_targets) >= 1
                     score = 22000 if use_boss else -1
                 elif card.id == Lana_Aid:
                     lana_targets = {Grookey, Applin_TWM, Applin_SCR, Dipplin,
@@ -386,7 +459,11 @@ def agent(obs_dict: dict) -> list[int]:
             score = 8000 if need_retreat else -1
 
         elif o.type == OptionType.ATTACK:
-            score = 1000
+            if idx in sim_info:
+                d, ko = sim_info[idx]
+                score = 8000 if ko else (1000 + min(d * 10, 3000))
+            else:
+                score = 1000
 
         elif o.type == OptionType.CARD:
             card = get_card(obs, o.area, o.index, o.playerIndex)
@@ -400,7 +477,7 @@ def agent(obs_dict: dict) -> list[int]:
                            SelectContext.SETUP_ACTIVE_POKEMON):
                 if o.playerIndex != my_index:
                     # Boss Orders: KOできるターゲットを最優先、残HPが低いほど高スコア
-                    score = (10000 - card.hp) if isinstance(card, Pokemon) and card.hp <= my_damage else 0
+                    score = (10000 - card.hp) if isinstance(card, Pokemon) and card.hp <= sim_best_damage else 0
                 else:
                     # 優先度: Festival Lead アタッカー > 捨て駒 > ベンチ役（Thwackey/Rabsca）
                     score = energy_count * 200
