@@ -4,7 +4,7 @@ from collections import defaultdict
 
 from cg.api import (
     AreaType, CardType, Observation, SelectContext, OptionType,
-    Card, Pokemon, all_card_data, to_observation_class,
+    Card, Pokemon, all_card_data, all_attack, to_observation_class,
 )
 
 """
@@ -23,6 +23,7 @@ if len(my_deck) != 60:
 
 all_card = all_card_data()
 card_table = {c.cardId: c for c in all_card}
+attack_table = {a.attackId: a for a in all_attack()}
 
 # Decklist
 Grookey          = 89    # ×4
@@ -120,10 +121,52 @@ def agent(obs_dict: dict) -> list[int]:
         c.id == Dipplin and len(c.energies) >= 1 for c in my_state.bench
     )
 
+    # ベンチで今すぐ進化できるか（appearThisTurn=True は進化不可）
+    grookey_evolvable = any(
+        c.id == Grookey and not c.appearThisTurn for c in my_state.bench
+    )
+    applin_evolvable = any(
+        c.id in (Applin_TWM, Applin_SCR) and not c.appearThisTurn for c in my_state.bench
+    )
+    # Festival Lead 前 + 進化可能 Grookey あり + Thwackey 未展開
+    # → Thwackey に進化すれば Boom Boom Groove で即サーチできるため最優先
+    can_thwackey_combo = (
+        active_has_festival_lead
+        and grookey_evolvable
+        and field_counts[Thwackey] == 0
+    )
+
     # 相手バトルポケモンがexか
     op_active_is_ex = False
-    if op_state.active and op_state.active[0] is not None:
-        op_active_is_ex = card_table[op_state.active[0].id].ex
+    op_active_poke = op_state.active[0] if op_state.active and op_state.active[0] is not None else None
+    if op_active_poke:
+        op_active_is_ex = card_table[op_active_poke.id].ex
+
+    # 自分が攻撃できるか（Festival Lead がアクティブ + エネルギー有 + 状態異常なし）
+    my_active_poke = my_state.active[0] if my_state.active and my_state.active[0] is not None else None
+    can_attack_now = (
+        my_active_poke is not None
+        and my_active_poke.id in FESTIVAL_LEAD_IDS
+        and len(my_active_poke.energies) >= 1
+        and not my_state.asleep
+        and not my_state.paralyzed
+    )
+
+    # 今ターンの推定ダメージ（最大攻撃 × Festival Grounds 時は 2 回分）
+    my_damage = 0
+    if my_active_poke:
+        data = card_table[my_active_poke.id]
+        my_damage = max(
+            (attack_table[aid].damage for aid in data.attacks if aid in attack_table),
+            default=0,
+        )
+        if festival_up:
+            my_damage *= 2
+
+    # 相手アクティブを今ターンに倒せないか
+    cannot_ko_active = (
+        op_active_poke is None or op_active_poke.hp > my_damage
+    )
 
     # --- スコアリング ---
     scores = []
@@ -177,8 +220,13 @@ def agent(obs_dict: dict) -> list[int]:
                     # ex 相手に攻撃できるターンだけ有効
                     score = 26000 if op_active_is_ex else -1
                 elif card.id == Boss_Orders:
-                    # ベンチに価値ある相手がいる場合
-                    score = 22000 if len(op_state.bench) >= 1 else -1
+                    # 攻撃できる かつ 相手アクティブを倒せない場合のみ使う
+                    use_boss = (
+                        can_attack_now
+                        and cannot_ko_active
+                        and len(op_state.bench) >= 1
+                    )
+                    score = 22000 if use_boss else -1
                 elif card.id == Lana_Aid:
                     # 捨て札にポケモン or エネルギーがある場合
                     recoverable = sum(
@@ -298,21 +346,27 @@ def agent(obs_dict: dict) -> list[int]:
 
             elif context in (SelectContext.TO_BENCH, SelectContext.TO_HAND):
                 # デッキやディスカードから手札/ベンチへ加えるカードを選ぶ
-                # 優先度: Applin > Dipplin > Grookey > Thwackey > その他
-                if card.id in (Applin_TWM, Applin_SCR):
-                    score = 1000
+                if can_thwackey_combo and card.id == Thwackey:
+                    # Festival Lead 前 + 進化可能 Grookey あり → 即 Boom Boom Groove コンボ
+                    score = 1500
+                elif card.id in (Applin_TWM, Applin_SCR):
+                    # ベンチが空いていれば即プレイ可能
+                    score = 1000 if not bench_full else 100
                 elif card.id == Dipplin:
-                    score = 900 if field_counts[Applin_TWM] + field_counts[Applin_SCR] >= 1 else 400
+                    # 進化可能 Applin があれば即使える、ある程度いても手持ちとして有効
+                    score = 950 if applin_evolvable else (600 if field_counts[Applin_TWM] + field_counts[Applin_SCR] >= 1 else 300)
                 elif card.id == Grookey:
-                    score = 800 if field_counts[Grookey] + field_counts[Thwackey] == 0 else 200
+                    # Grookey が 0 枚かつベンチに置ける場合のみ高優先
+                    score = 800 if (field_counts[Grookey] + field_counts[Thwackey] == 0 and not bench_full) else 150
                 elif card.id == Thwackey:
-                    score = 700 if field_counts[Thwackey] == 0 else 100
+                    # Grookey がいれば将来使える、いなければほぼ無意味
+                    score = 700 if (field_counts[Thwackey] == 0 and field_counts[Grookey] >= 1) else 50
                 elif card.id == Festival_Grounds:
                     score = 600 if not festival_up else 50
                 elif card.id == Goldeen:
-                    score = 500 if field_counts[Goldeen] + field_counts[Seaking] == 0 else 50
+                    score = 500 if (field_counts[Goldeen] + field_counts[Seaking] == 0 and not bench_full) else 50
                 elif card.id == Rellor:
-                    score = 300 if field_counts[Rabsca] + field_counts[Rellor] == 0 else 10
+                    score = 300 if (field_counts[Rabsca] + field_counts[Rellor] == 0 and not bench_full) else 10
                 elif card.id == Grass_Energy:
                     score = 250
                 else:

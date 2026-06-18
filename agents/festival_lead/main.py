@@ -1,10 +1,9 @@
 import os
-import random
 from collections import defaultdict
 
 from cg.api import (
     AreaType, CardType, Observation, SelectContext, OptionType,
-    Card, Pokemon, all_card_data, to_observation_class,
+    Card, Pokemon, all_card_data, all_attack, to_observation_class,
 )
 
 """
@@ -23,6 +22,7 @@ if len(my_deck) != 60:
 
 all_card = all_card_data()
 card_table = {c.cardId: c for c in all_card}
+attack_table = {a.attackId: a for a in all_attack()}
 
 # Decklist
 Grookey          = 89    # ×4
@@ -87,7 +87,7 @@ def agent(obs_dict: dict) -> list[int]:
     discard_counts = defaultdict(int)
 
     active_has_festival_lead = False
-    festival_lead_on_bench   = False  # エネルギー不問（入れ替え判断用）
+    festival_lead_on_bench   = False
 
     for card in my_state.active:
         if card is None:
@@ -115,17 +115,136 @@ def agent(obs_dict: dict) -> list[int]:
     no_draw     = (my_state.deckCount <= 5)
     bench_full  = (len(my_state.bench) >= 5)
 
-    # メインアタッカーがベンチにいるか（Dipplin 優先）
-    has_dipplin_bench = any(
-        c.id == Dipplin and len(c.energies) >= 1 for c in my_state.bench
+    # 進化可否（appearThisTurn=True は進化不可）
+    grookey_evolvable = any(
+        c.id == Grookey and not c.appearThisTurn for c in my_state.bench
+    )
+    applin_evolvable = any(
+        c.id in (Applin_TWM, Applin_SCR) and not c.appearThisTurn for c in my_state.bench
+    )
+    can_thwackey_combo = (
+        active_has_festival_lead
+        and grookey_evolvable
+        and field_counts[Thwackey] == 0
     )
 
-    # 相手バトルポケモンがexか
-    op_active_is_ex = False
-    if op_state.active and op_state.active[0] is not None:
-        op_active_is_ex = card_table[op_state.active[0].id].ex
+    # 相手アクティブ情報
+    op_active_poke = op_state.active[0] if op_state.active and op_state.active[0] is not None else None
+    op_active_is_ex = card_table[op_active_poke.id].ex if op_active_poke else False
 
-    # --- スコアリング ---
+    # 自分のアクティブ情報
+    my_active_poke = my_state.active[0] if my_state.active and my_state.active[0] is not None else None
+    can_attack_now = (
+        my_active_poke is not None
+        and my_active_poke.id in FESTIVAL_LEAD_IDS
+        and len(my_active_poke.energies) >= 1
+        and not my_state.asleep
+        and not my_state.paralyzed
+    )
+
+    my_damage = 0
+    if my_active_poke:
+        data = card_table[my_active_poke.id]
+        my_damage = max(
+            (attack_table[aid].damage for aid in data.attacks if aid in attack_table),
+            default=0,
+        )
+        if festival_up:
+            my_damage *= 2
+
+    cannot_ko_active = (op_active_poke is None or op_active_poke.hp > my_damage)
+
+    # ================================================================
+    # ニーズアセスメント
+    # priority 10=今すぐ必要（最高） → 1=あれば嬉しい程度
+    # 手札にすでにあるカードは登録しない（TO_HAND で出てこないため不要）
+    # ================================================================
+    needs: dict[int, int] = {}
+
+    def need(card_id: int, priority: int) -> None:
+        """既存より高い優先度の場合のみ更新"""
+        if priority > needs.get(card_id, 0):
+            needs[card_id] = priority
+
+    # スタジアム（攻撃回数を増やすボーナス。攻撃できること自体より優先度は低い）
+    if not festival_up and hand_counts.get(Festival_Grounds, 0) == 0:
+        need(Festival_Grounds, 6)
+
+    # Thwackey コンボ（Festival Lead前 + 進化可能 Grookey → 即 Boom Boom Groove）
+    if can_thwackey_combo:
+        need(Thwackey, 10)
+
+    # 進化先（今すぐ進化可能なら9、次ターン以降なら7）
+    applin_in_play = field_counts[Applin_TWM] + field_counts[Applin_SCR]
+    if applin_in_play > 0 and field_counts[Dipplin] == 0:
+        need(Dipplin, 9 if applin_evolvable else 7)
+
+    if field_counts[Grookey] > 0 and field_counts[Thwackey] == 0:
+        need(Thwackey, 9 if grookey_evolvable else 7)
+
+    # ドロー補充（サポーター未使用 + 手札不足）
+    if hand_counts.get(Lillie_Det, 0) == 0 and not state.supporterPlayed:
+        need(Lillie_Det, 9 if my_state.handCount <= 3 else 6)
+
+    # 退場手段（退場することで攻撃またはコンボが可能になる時のみ高優先）
+    bench_fl_can_attack = any(
+        c.id in FESTIVAL_LEAD_IDS and len(c.energies) >= 1
+        for c in my_state.bench
+    )
+    bench_fl_enables_combo = (
+        field_counts[Thwackey] >= 1
+        and any(c.id in FESTIVAL_LEAD_IDS for c in my_state.bench)
+    )
+    need_retreat = not active_has_festival_lead and (bench_fl_can_attack or bench_fl_enables_combo)
+    if need_retreat:
+        if hand_counts.get(Air_Balloon, 0) == 0:
+            need(Air_Balloon, 8)
+        if hand_counts.get(Switch_Card, 0) == 0:
+            need(Switch_Card, 6)
+
+    # 基本ポケモン（ベンチに置ける）
+    if not bench_full:
+        if applin_in_play == 0:
+            need(Applin_TWM, 8)
+            need(Applin_SCR, 8)
+        else:
+            need(Applin_TWM, 5)
+            need(Applin_SCR, 5)
+
+        if field_counts[Grookey] + field_counts[Thwackey] == 0:
+            need(Grookey, 7)
+
+        if field_counts[Goldeen] + field_counts[Seaking] == 0:
+            need(Goldeen, 5)
+
+        if field_counts[Rellor] + field_counts[Rabsca] == 0:
+            need(Rellor, 3)
+
+    # エネルギー（アタッカーが無エネ）
+    attacker_needs_energy = (
+        (my_active_poke and my_active_poke.id in FESTIVAL_LEAD_IDS
+         and len(my_active_poke.energies) == 0)
+        or any(c.id in FESTIVAL_LEAD_IDS and len(c.energies) == 0 for c in my_state.bench)
+    )
+    need(Grass_Energy, 6 if attacker_needs_energy else 3)
+
+    # どうぐ（アクティブアタッカーがツール未装備）
+    if my_active_poke and my_active_poke.id in FESTIVAL_LEAD_IDS and len(my_active_poke.tools) == 0:
+        need(Brave_Bangle, 4)
+        need(Air_Balloon, 4)  # 退場不要でも装備価値あり（退場必要時は上書きされない）
+
+    # サーチカードの価値計算（PLAY スコア算出用）
+    pokemon_need_max = max(
+        (p for cid, p in needs.items()
+         if cid in card_table and card_table[cid].cardType == CardType.POKEMON),
+        default=0,
+    )
+    any_need_max = max(needs.values(), default=0)
+    need_types = {card_table[cid].cardType for cid in needs if cid in card_table}
+
+    # ================================================================
+    # スコアリング
+    # ================================================================
     scores = []
     for o in select.option:
         score = 0
@@ -145,7 +264,6 @@ def agent(obs_dict: dict) -> list[int]:
             data = card_table[card.id]
 
             if data.cardType == CardType.POKEMON:
-                # ポケモンをプレイ（バシック → ベンチへ）
                 score = 50000
                 if card.id == Grookey and field_counts[Grookey] + field_counts[Thwackey] >= 2:
                     score = -1
@@ -160,11 +278,7 @@ def agent(obs_dict: dict) -> list[int]:
                     score = -1
 
             elif data.cardType == CardType.STADIUM:
-                # Festival Grounds を貼る
-                if stadium_id == Festival_Grounds:
-                    score = -1
-                else:
-                    score = 70000
+                score = -1 if stadium_id == Festival_Grounds else 70000
 
             elif data.cardType == CardType.SUPPORTER:
                 if state.supporterPlayed:
@@ -174,13 +288,11 @@ def agent(obs_dict: dict) -> list[int]:
                 elif card.id == Lillie_Det:
                     score = 25000
                 elif card.id == Black_Belt:
-                    # ex 相手に攻撃できるターンだけ有効
                     score = 26000 if op_active_is_ex else -1
                 elif card.id == Boss_Orders:
-                    # ベンチに価値ある相手がいる場合
-                    score = 22000 if len(op_state.bench) >= 1 else -1
+                    use_boss = can_attack_now and cannot_ko_active and len(op_state.bench) >= 1
+                    score = 22000 if use_boss else -1
                 elif card.id == Lana_Aid:
-                    # 捨て札にポケモン or エネルギーがある場合
                     recoverable = sum(
                         v for k, v in discard_counts.items()
                         if k in (Grookey, Applin_TWM, Applin_SCR, Dipplin,
@@ -194,11 +306,14 @@ def agent(obs_dict: dict) -> list[int]:
 
             else:  # ITEM
                 if card.id == Buddy_Poffin:
-                    score = 45000 if not bench_full else -1
+                    # ベンチが薄く進化できる基本もいない → ベーシック2枚展開が急務
+                    need_basics = len(my_state.bench) <= 1 and not (grookey_evolvable or applin_evolvable)
+                    score = 45000 if (not bench_full and need_basics) else (20000 if not bench_full else -1)
                 elif card.id == Poke_Pad:
-                    score = 40000
+                    # ポケモンニーズが高いほど急いで使う
+                    score = 40000 if pokemon_need_max >= 7 else (28000 if pokemon_need_max >= 4 else 12000)
                 elif card.id == Bug_Catching:
-                    score = 38000
+                    score = 38000 if pokemon_need_max >= 7 else (25000 if pokemon_need_max >= 4 else 10000)
                 elif card.id == Night_Stretcher:
                     recoverable = sum(
                         v for k, v in discard_counts.items()
@@ -207,8 +322,8 @@ def agent(obs_dict: dict) -> list[int]:
                     )
                     score = 35000 if recoverable >= 1 else -1
                 elif card.id == Secret_Box:
-                    # 手札3枚以上の余裕がある時だけ使う
-                    score = 30000 if my_state.handCount >= 4 else -1
+                    # 充足できるカードタイプが多いほど高価値
+                    score = 32000 if len(need_types) >= 3 else (28000 if len(need_types) >= 2 else (20000 if any_need_max >= 7 else -1))
                 elif card.id == Switch_Card:
                     score = 10000 if festival_lead_on_bench else -1
 
@@ -227,16 +342,12 @@ def agent(obs_dict: dict) -> list[int]:
 
                 if is_active:
                     if pokemon.id in FESTIVAL_LEAD_IDS:
-                        # アタッカーは1枚で十分。2枚目以降は付けない
                         score = 20000 if energy_count == 0 else -1
                     elif pokemon.id == Thwackey:
-                        # 逃げるために2枚まで許可
                         score = 10000 if energy_count < 2 else -1
                     else:
                         score = -1
                 else:
-                    # ベンチ：進化ライン（Applin含む）に1枚だけ準備付け
-                    # Applin にエネルギーを付けておくと Dipplin 進化後即攻撃できる
                     if pokemon.id == Dipplin:
                         score = 15000 if energy_count == 0 else -1
                     elif pokemon.id in (Applin_TWM, Applin_SCR):
@@ -251,16 +362,15 @@ def agent(obs_dict: dict) -> list[int]:
             if no_draw:
                 score = -1
             elif card.id == Thwackey:
-                # Boom Boom Groove: Festival Lead が場にいる時だけ有効
                 score = 55000 if active_has_festival_lead else -1
             else:
                 score = 30000
 
         elif o.type == OptionType.RETREAT:
-            score = 8000 if festival_lead_on_bench and not active_has_festival_lead else -1
+            score = 8000 if need_retreat else -1
 
         elif o.type == OptionType.ATTACK:
-            score = 1000  # 攻撃はターン最後
+            score = 1000
 
         elif o.type == OptionType.CARD:
             card = get_card(obs, o.area, o.index, o.playerIndex)
@@ -274,72 +384,46 @@ def agent(obs_dict: dict) -> list[int]:
                            SelectContext.SETUP_ACTIVE_POKEMON):
                 # 優先度: Festival Lead アタッカー > 捨て駒 > ベンチ役（Thwackey/Rabsca）
                 score = energy_count * 200
-                if card.id == Dipplin:                score += 5000
-                elif card.id == Seaking:              score += 3000
-                elif card.id == Goldeen:              score += 2000
+                if card.id == Dipplin:                              score += 5000
+                elif card.id == Seaking:                            score += 3000
+                elif card.id == Goldeen:                            score += 2000
                 elif card.id in (Grookey, Applin_TWM, Applin_SCR): score += 500
-                elif card.id == Rellor:               score += 300
-                elif card.id == Thwackey:             score += 100  # ベンチ特性要員なので前に出したくない
-                elif card.id == Rabsca:               score += 50
-                elif card.id == Shaymin:              score += 50
+                elif card.id == Rellor:                             score += 300
+                elif card.id == Thwackey:                           score += 100
+                elif card.id == Rabsca:                             score += 50
+                elif card.id == Shaymin:                            score += 50
 
             elif context == SelectContext.SETUP_BENCH_POKEMON:
-                # 初期ベンチ選択：Festival Lead 持ちを優先
-                if card.id in (Applin_TWM, Applin_SCR):
-                    score = 500
-                elif card.id == Grookey:
-                    score = 400
-                elif card.id == Goldeen:
-                    score = 300
-                elif card.id == Rellor:
-                    score = 200
-                else:
-                    score = 100
+                if card.id in (Applin_TWM, Applin_SCR): score = 500
+                elif card.id == Grookey:                score = 400
+                elif card.id == Goldeen:                score = 300
+                elif card.id == Rellor:                 score = 200
+                else:                                   score = 100
 
             elif context in (SelectContext.TO_BENCH, SelectContext.TO_HAND):
-                # デッキやディスカードから手札/ベンチへ加えるカードを選ぶ
-                # 優先度: Applin > Dipplin > Grookey > Thwackey > その他
-                if card.id in (Applin_TWM, Applin_SCR):
-                    score = 1000
-                elif card.id == Dipplin:
-                    score = 900 if field_counts[Applin_TWM] + field_counts[Applin_SCR] >= 1 else 400
-                elif card.id == Grookey:
-                    score = 800 if field_counts[Grookey] + field_counts[Thwackey] == 0 else 200
-                elif card.id == Thwackey:
-                    score = 700 if field_counts[Thwackey] == 0 else 100
-                elif card.id == Festival_Grounds:
-                    score = 600 if not festival_up else 50
-                elif card.id == Goldeen:
-                    score = 500 if field_counts[Goldeen] + field_counts[Seaking] == 0 else 50
-                elif card.id == Rellor:
-                    score = 300 if field_counts[Rabsca] + field_counts[Rellor] == 0 else 10
-                elif card.id == Grass_Energy:
-                    score = 250
-                else:
-                    score = 100
-                # 重複ペナルティ
+                # ニーズ優先度をそのままスコアに変換（priority 10 → 1000）
+                score = needs.get(card.id, 0) * 100
+                # 重複ペナルティ（手札に同じカードが2枚以上）
                 if hand_counts.get(card.id, 0) >= 2:
-                    score -= 500
+                    score -= 300
 
             elif context == SelectContext.DISCARD:
-                # 捨てるカードを選ぶ：不要なものを優先
                 score = 0
                 if card.id == Grass_Energy:
-                    score = 10   # エネルギーは少ないので温存
+                    score = 10
                 elif card.id in (Dipplin, Thwackey, Rabsca, Shaymin, Festival_Grounds):
-                    score = -500  # 重要カードは捨てたくない
+                    score = -500
                 elif card.id in (Grookey, Applin_TWM, Applin_SCR):
                     score = 100 if field_counts.get(card.id, 0) >= 2 else 50
                 else:
                     score = 200
                 if hand_counts.get(card.id, 0) >= 2:
-                    score += 300  # 重複は捨てやすい
+                    score += 300
 
         scores.append(score)
 
     desc_indices = [i for i, _ in sorted(enumerate(scores), key=lambda x: x[1], reverse=True)]
 
-    # minCount 以上 maxCount 以下、スコア負のものは可能な限り除外
     output = []
     for i in desc_indices:
         if len(output) >= select.maxCount:

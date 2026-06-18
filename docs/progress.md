@@ -1,9 +1,21 @@
-# プロジェクト進捗
+﻿# プロジェクト進捗
 
 ## 現状サマリー
-- **フェーズ**: v1 ルールベースエージェント提出済み・改良中
-- **提出物**: `submissions/v1_festival_lead.tar.gz`（Festival Lead デッキ）
+- **フェーズ**: v2 提出済み・ニーズベース設計（v3）開発中
+- **提出物**: `submissions/v2_festival_lead.tar.gz`（最新提出）
 - **締切**: 2026年8月16日
+
+---
+
+## バージョン履歴と評価結果
+
+| Version | Dragapult ex | Iono's Deck | Mega Abomasnow | Mega Lucario ex | TOTAL | 主な変更 |
+|---------|-------------|-------------|----------------|-----------------|-------|---------|
+| v1 | 9% | 25% | 26% | 52% | **28%** | 初版ルールベース |
+| v2 | 13% | 35% | 39% | 58% | **36%** | Thwackey コンボ優先・Boss 条件修正・退場条件改善 |
+| v3 (開発中) | 20% | 52% | 34% | 61% | **42%** | ニーズベースアーキテクチャに全面リライト |
+
+※各100試合、4種のサンプルルールベースエージェント相手の勝率
 
 ---
 
@@ -16,44 +28,44 @@
 - [x] カードデータ取得（`data/raw/EN_Card_Data.csv`, `JP_Card_Data.csv`）
 - [x] ルールベースサンプル 4 本ダウンロード・分析（`notebooks/`）
 - [x] RL + MCTS サンプルダウンロード（`notebooks/`）
-- [x] 実装リファレンス作成（`docs/rule_based_agent_reference.md`）
 
 ### デッキ構築
-- [x] Festival Lead デッキ設計（コンセプト: Festival Grounds + Festival Lead 特性で2回攻撃）
-- [x] `newdeck/deck.csv` 作成・カードID 修正（InSampleList.txt 準拠）
-- [x] `submission/deck.csv` へ反映
+- [x] Festival Lead デッキ設計（コンセプト: Festival Grounds + 特性で2回攻撃）
+- [x] `agents/festival_lead/deck.csv` 作成・カードID 修正（InSampleList.txt 準拠）
 
-### エージェント実装（v1）
-- [x] `newdeck/main.py` — Festival Lead デッキ用ルールベースエージェント
-- [x] `submission/main.py` へ反映
-- [x] `submissions/v1_festival_lead.tar.gz` 作成・Kaggle アップロード確認（エラーなし）
+### エージェント実装
+- [x] **v1**: 初版ルールベースエージェント（`submissions/v1_festival_lead.tar.gz`）
+- [x] **v2**: Thwackey コンボ優先・Boss 条件修正・エネルギー付与改善（`submissions/v2_festival_lead.tar.gz`）
+- [x] **v3**: ニーズベースアーキテクチャに全面リライト（`agents/festival_lead/main.py`、未提出）
+  - `needs: dict[card_id, priority]` で必要カードを一元管理
+  - Festival_Grounds は bonus（priority 6）に格下げ
+  - 退場条件を「コンボ or 攻撃が可能になる場合のみ」に絞り込み
 
-### v1 → v2 改良（2026-06-18）
-リプレイ確認後に発見した問題を修正済み（`newdeck/main.py`、未提出）：
-
-| 問題 | 修正内容 |
-|------|----------|
-| サーチ系カードの取得優先度が不適切 | Applin > Dipplin > Grookey > Thwackey > その他 に変更 |
-| アタッカー以外が前に出やすい | 退場条件を「ベンチの Festival Lead にエネルギー不問」に緩和 |
-| 倒された後 Thwackey が前に出る | 交代優先度でThwackey をGrookey/Applin より低く設定 |
-| 前のアタッカーにエネルギーを2枚貼る | バトル場は1枚、Thwackey のみ2枚（逃げ用）に制限 |
-| Applin にエネルギーを貼らない | Applin ベンチへの1枚付与を追加（進化後即攻撃対応） |
+### 開発インフラ
+- [x] ローカルシミュレーター構築（`simulate.py` + `opponents/`）
+  - cabt Engine を直接使用してKaggle提出なしで評価可能
+  - 対戦相手: Dragapult ex / Iono's Deck / Mega Abomasnow / Mega Lucario ex
+- [x] バージョン比較機能（`python simulate.py festival_lead --compare`）
+  - 直近アーカイブ vs current のみシミュレート（2バージョン分）
+  - 古いバージョンは `results.json` からキャッシュ参照（再シミュレートなし）
+  - 50試合未満のクイックテストはキャッシュを上書きしない
+- [x] 提出スクリプト（`agents/festival_lead/submit.py`）
+  - 提出時に `v{n}_agent.py` を自動アーカイブ（次回比較用）
+  - `submission/` 同期・tar.gz 作成を一括実行
 
 ---
 
 ## 未着手・TODO
 
 ### エージェント改良
-- [ ] 改良版を `submission/` へ反映・v2 提出
-- [ ] 手動プレイのログを受け取り分析（ユーザーが別途送付予定）
+- [ ] v3 の評価・提出
+- [ ] Dragapult ex 対策（現状最も勝率が低い: 20%）
 - [ ] サポーター選択ロジックの精査
-- [ ] Boss's Orders の対象選択ロジック
-- [ ] Festival Lead 2回攻撃の最適化
+- [ ] Rabsca の特性活用（デッキ操作）
 
 ### 発展
 - [ ] MCTS（モンテカルロ木探索）の実装検討
-- [ ] 強化学習の検討（sim モジュールの探索 API を活用）
-- [ ] ローカルでの自己対戦テスト環境構築
+- [ ] 強化学習の検討（`cg.sim` の探索 API を活用）
 
 ---
 
@@ -61,8 +73,8 @@
 
 | 期間 | 目標 |
 |------|------|
-| 〜6月末 | リプレイログ分析・v2 改良版提出 |
-| 〜7月中旬 | サポーター・コンボロジック強化 |
+| 〜6月末 | v3 評価・提出 |
+| 〜7月中旬 | Dragapult 対策・v4 改良版提出 |
 | 〜8月上旬 | 探索・評価関数の強化 |
 | 8月16日 | 最終提出 |
 
@@ -74,4 +86,3 @@
 - 相手の手札・デッキは非公開（不完全情報ゲーム）
 - ランキングはμ（初期値600）の大小で決定
 - 1日最大5提出、最新2提出のみ追跡される
-- 提出アーカイブは `submissions/` に `v{n}_xxx.tar.gz` 形式で保存
