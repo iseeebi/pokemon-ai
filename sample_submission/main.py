@@ -4,19 +4,24 @@ import random
 from cg.api import Observation, to_observation_class
 
 def read_deck_csv() -> list[int]:
-    """Read deck.csv.
-    
-    Returns:
-        list[int]: A list of card IDs in the deck.
-    """
     file_path = "deck.csv"
+
     if not os.path.exists(file_path):
         file_path = "/kaggle_simulations/agent/" + file_path
-    with open(file_path, "r") as file:
-        csv = file.read().split("\n")
+
     deck = []
-    for i in range(60):
-        deck.append(int(csv[i]))
+
+    with open(file_path, "r", encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if line == "":
+                continue
+            deck.append(int(line))
+
+    # 強制チェック
+    if len(deck) != 60:
+        raise ValueError(f"Deck size invalid: {len(deck)}")
+
     return deck
 
 def agent(obs_dict: dict) -> list[int]:

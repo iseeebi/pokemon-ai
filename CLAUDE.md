@@ -17,6 +17,20 @@ Kaggle コンテスト「The Pokémon Company - PTCG AI Battle Challenge Simulat
 pokemon-ai/
 ├── CLAUDE.md                   # このファイル
 ├── README.md                   # プロジェクト概要（UTF-16 LE）
+├── agents/                     # デッキ×エージェントの開発ワークスペース
+│   └── festival_lead/          # Festival Lead デッキ（現行）
+│       ├── main.py             # エージェント本体
+│       ├── deck.csv            # デッキリスト
+│       └── InSampleList.txt    # 使用可能カードID一覧
+│   └── (新デッキ名)/            # 新デッキはここに追加
+│       ├── main.py
+│       └── deck.csv
+├── submission/                 # 提出スロット（agents/XXX/ からコピー）
+│   ├── main.py                 # エージェント本体
+│   ├── deck.csv                # 使用デッキ
+│   └── cg/                     # cabt Engine Python バインディング（変更しない）
+├── submissions/                # 提出アーカイブ履歴
+│   └── v{n}_{deck_name}.tar.gz
 ├── docs/
 │   ├── contest_overview.md     # コンテスト詳細（UTF-8）
 │   ├── api_reference.md        # cabt Engine API仕様（UTF-8）
@@ -26,15 +40,11 @@ pokemon-ai/
 │   ├── JP_Card_Data.csv        # 日本語カードデータ
 │   ├── Card_ID List_EN.pdf     # カードIDリスト（英語）
 │   └── Card_ID List_JP.pdf     # カードIDリスト（日本語）
-├── sample_submission/          # サンプル（変更しない）
-│   ├── main.py                 # ランダムエージェント（参照用）
-│   ├── deck.csv                # サンプルデッキ
-│   └── cg/                     # cabt Engine Python バインディング
-├── submission/                 # 実際の提出物（ここを編集する）
-│   ├── main.py                 # エージェント本体
-│   ├── deck.csv                # 使用デッキ
-│   └── cg/                     # cabt Engine Python バインディング
-└── submission.tar.gz           # 提出用アーカイブ
+├── notebooks/                  # 参照ノートブック（Kaggle公開サンプル）
+└── sample_submission/          # 公式サンプル（変更しない）
+    ├── main.py                 # ランダムエージェント（参照用）
+    ├── deck.csv                # サンプルデッキ
+    └── cg/                     # cabt Engine Python バインディング
 ```
 
 ---
@@ -99,10 +109,10 @@ tar -czvf ../submission.tar.gz *
 
 ## 開発方針
 
-1. **編集対象は `submission/` のみ**（`sample_submission/` は参照用として変更しない）
-2. **`cg/` ディレクトリは変更しない**（バイナリの cabt Engine バインディング）
-3. デッキは `submission/deck.csv` を編集（カードID 60行）
-4. エージェントロジックは `submission/main.py` に実装
+1. **新デッキ・エージェントは `agents/{deck_name}/` に作成**（`main.py` + `deck.csv`）
+2. **提出時は `agents/{deck_name}/` の内容を `submission/` にコピー**してから tar.gz を作成
+3. **`submission/cg/` と `sample_submission/` は変更しない**（バイナリの cabt Engine バインディング）
+4. **提出アーカイブは `submissions/v{n}_{deck_name}.tar.gz` で保存**
 
 ---
 
